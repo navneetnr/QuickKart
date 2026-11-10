@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart'; // Or a standard UUID / unique string generator
 
 import '../../../core/network/api_exceptions.dart';
 import '../../app_config/presentation/app_config_controller.dart';
@@ -55,12 +56,30 @@ class CheckoutController extends Notifier<CheckoutState> {
 
   Future<CheckoutResult> placeOrder() async {
     state = const CheckoutState(isPlacingOrder: true);
-    final result = await _placeOrder(retryOnTimeout: true);
+
+    // Check if store is open or checkout is allowed via remote config
+    final config = ref.read(appConfigControllerProvider);
+    if (!config.isStoreOpen) {
+      const failure = CheckoutFailure('The store is currently closed. You cannot place orders right now.');
+      state = const CheckoutState(lastResult: failure);
+      return failure;
+    }
+
+    // Generate a single stable idempotency key for this checkout session
+    final idempotencyKey = const Uuid().v4();
+
+    final result = await _placeOrder(
+      idempotencyKey: idempotencyKey,
+      retryOnTimeout: true,
+    );
     state = CheckoutState(lastResult: result);
     return result;
   }
 
-  Future<CheckoutResult> _placeOrder({required bool retryOnTimeout}) async {
+  Future<CheckoutResult> _placeOrder({
+    required String idempotencyKey,
+    required bool retryOnTimeout,
+  }) async {
     final cart = ref.read(cartControllerProvider);
     if (cart.isEmpty) {
       return const CheckoutFailure('Your cart is empty');
@@ -69,13 +88,22 @@ class CheckoutController extends Notifier<CheckoutState> {
         CartPricing.compute(cart, ref.read(appConfigControllerProvider));
 
     try {
-      final order = await ref.read(orderApiProvider).placeOrder(cart, pricing);
+      // Pass the stable idempotency key to the order API client
+      final order = await ref.read(orderApiProvider).placeOrder(
+            cart,
+            pricing,
+            idempotencyKey: idempotencyKey,
+          );
       await ref.read(cartControllerProvider.notifier).clear();
       return CheckoutSuccess(order);
     } on ApiTimeoutException {
-      // Slow networks are common; give it one more go before bothering
-      // the user.
-      if (retryOnTimeout) return _placeOrder(retryOnTimeout: false);
+      // Slow networks are common; retry once with the EXACT SAME idempotency key
+      if (retryOnTimeout) {
+        return _placeOrder(
+          idempotencyKey: idempotencyKey,
+          retryOnTimeout: false,
+        );
+      }
       return const CheckoutFailure(
         'The request timed out. Please try again.',
         canRetry: true,
