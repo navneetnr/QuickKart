@@ -4,20 +4,16 @@
 
 ## 1. Cart reconciliation policy (Feature 1)
 
-- **When does reconciliation run, and why there?** It runs prior to checkout confirmation (`CheckoutController`) and when restoring sessions to ensure transactional integrity against live backend inventory and pricing.
-- **What does the user see for each kind of change?** 
-  - Price up/down: Refreshed unit price with an itemized change notification.
-  - Out of stock / Discontinued: Item removed with an explicit warning message.
-  - Quantity reduced: Adjusted down to match current stock or `maxPerOrder`.
-  - Coupon removed: Notice stating the coupon is expired or no longer valid.
+- **When does reconciliation run, and why there?** It runs immediately before checkout so the request uses current catalog, stock, coupon, and pricing data. A server conflict triggers a second reconciliation before checkout can be retried.
+- **What does the user see for each kind of change?** A review dialog lists price increases, unavailable products, quantity reductions, and coupon removals by product name/code. The user accepts the updated cart, then places the order again. Price drops update silently.
 - **What happens to out-of-stock / discontinued items?** They are safely filtered out of the reconciled cart lines, and a corresponding `CartChange` entry is reported to the user.
 - **Offline-built carts:** If offline during reconciliation, standard network error handling throws an `ApiException` preventing unsafe checkout until connectivity or server validation is restored.
 - **Alternatives considered and rejected:** Silently dropping items without user notification (rejected because users must explicitly accept cart modifications before checkout).
 
 ## 2. Safe checkout & idempotency
 
-- **How are duplicate orders prevented?** Using a unique UUID `Idempotency-Key` header generated per checkout submission attempt, persisted during retry intervals to prevent duplicate order generation on network timeouts or double taps.
-- **What does the user see on timeout / lost response?** Clear, honest messaging indicating the request timed out or network connectivity was lost, inviting safe retry without fear of double-charging.
+- **How are duplicate orders prevented?** A UUID is sent in the `Idempotency-Key` header and persisted with a fingerprint of the cart and total. The same key is reused for the same unresolved request, including after timeout and app restart; concurrent taps share one in-flight operation.
+- **What does the user see on timeout / lost response?** Offline before sending is reported as not sent. After a timeout, the message says the order may have been placed and asks the customer to check My orders before retrying.
 - **Edge cases you handled:** Network drops mid-checkout, double taps on the pay button, and response timeouts using idempotency headers.
 - **Edge cases you know you did NOT handle:** Multi-device simultaneous cart mutation conflict resolution beyond standard single-client reconciliation.
 
@@ -25,7 +21,7 @@
 
 - **Caching strategy and failure behaviour:** Cached locally using `KeyValueStore` so the app functions seamlessly offline with last-known valid configuration parameters.
 - **How live updates propagate, and how you avoid leaks:** Stream listeners on `configRepositoryProvider` propagate updates live without memory leaks by disposing subscriptions appropriately.
-- **Force / optional update UX:** Blocking full-screen overlay for required updates (`force_update`); dismissible bottom sheet or banner prompt for optional updates.
+- **Force / optional update UX:** A blocking full-screen page for versions below `min_supported_version`; a dismissible dialog for an optional update, remembered by `latest_version`.
 - **Store closed UX:** Freely allows browsing the product catalog in read-only mode, but intercepts and blocks the checkout flow with an informative notice.
 - **Server-driven home: robustness to bad config:** Fallback default layout parsing if remote config payload contains malformed widgets or missing keys.
 
@@ -34,7 +30,7 @@
 
 ## 5. Other decisions
 
-- Packages added (and why): None added; utilized existing project dependencies (`flutter_riverpod`, etc.) to adhere strictly to constraints.
+- Packages added (and why): `url_launcher` opens the configured store update URL from the required and optional update prompts. The existing `uuid` dependency supplies idempotency keys.
 - Refactors you made to the existing code (and why): Enhanced `CartController` mutation methods to await storage persistence (`_storage.save`) preventing sync regressions.
 
 ## 6. Looking ahead

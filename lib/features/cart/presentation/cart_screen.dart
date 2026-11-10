@@ -11,6 +11,7 @@ import '../application/cart_controller.dart';
 import '../data/coupon_api.dart';
 import '../domain/cart.dart';
 import '../domain/cart_pricing.dart';
+import '../domain/reconciliation.dart';
 
 class CartScreen extends ConsumerWidget {
   const CartScreen({super.key});
@@ -37,6 +38,14 @@ class CartScreen extends ConsumerWidget {
           : ListView(
               padding: const EdgeInsets.all(12),
               children: [
+                if (!config.storeOpen)
+                  Card(
+                    color: Colors.red.shade50,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text(config.storeClosedMessage),
+                    ),
+                  ),
                 if (pricing.amountForFreeDeliveryPaise > 0)
                   Card(
                     color: Colors.green.shade50,
@@ -62,8 +71,12 @@ class CartScreen extends ConsumerWidget {
                 const SizedBox(height: 80),
               ],
             ),
-      bottomNavigationBar:
-          cart.isEmpty ? null : _PlaceOrderBar(totalPaise: pricing.totalPaise),
+      bottomNavigationBar: cart.isEmpty
+          ? null
+          : _PlaceOrderBar(
+              totalPaise: pricing.totalPaise,
+              storeOpen: config.storeOpen,
+            ),
     );
   }
 }
@@ -241,10 +254,21 @@ class _BillDetails extends StatelessWidget {
   }
 }
 
+String _describeChange(CartChange change) => switch (change) {
+      PriceChanged(:final productId, :final productName, :final oldPricePaise, :final newPricePaise) =>
+        '${productName ?? productId} price increased from ${formatMoney(oldPricePaise)} to ${formatMoney(newPricePaise)}.',
+      OutOfStock(:final productId, :final productName) => '${productName ?? productId} is out of stock and was removed.',
+      ProductUnavailable(:final productId, :final productName) => '${productName ?? productId} is no longer sold and was removed.',
+      QuantityReduced(:final productId, :final productName, :final requestedQuantity, :final availableQuantity) =>
+        '${productName ?? productId} quantity changed from $requestedQuantity to $availableQuantity.',
+      CouponRemoved(:final code, :final reason) => 'Coupon $code was removed ($reason).',
+    };
+
 class _PlaceOrderBar extends ConsumerWidget {
-  const _PlaceOrderBar({required this.totalPaise});
+  const _PlaceOrderBar({required this.totalPaise, required this.storeOpen});
 
   final int totalPaise;
+  final bool storeOpen;
 
   Future<void> _placeOrder(BuildContext context, WidgetRef ref) async {
     final messenger = ScaffoldMessenger.of(context);
@@ -256,10 +280,34 @@ class _PlaceOrderBar extends ConsumerWidget {
         navigator.pushReplacement(MaterialPageRoute<void>(
           builder: (_) => OrderSuccessScreen(order: order),
         ));
-      case CheckoutNeedsReview():
-        messenger.showSnackBar(const SnackBar(
-          content: Text('Your cart was updated. Please review it.'),
-        ));
+      case CheckoutNeedsReview(:final reconciliation, :final message):
+        await showDialog<void>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Please review your cart'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(message ?? 'The server changed these items. Accept the updated cart before ordering.'),
+                  const SizedBox(height: 12),
+                  for (final change in reconciliation.changes.where((c) => c.requiresUserReview))
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(_describeChange(change)),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Accept updated cart'),
+              ),
+            ],
+          ),
+        );
       case CheckoutFailure(:final message):
         messenger.showSnackBar(SnackBar(content: Text(message)));
     }
@@ -277,7 +325,7 @@ class _PlaceOrderBar extends ConsumerWidget {
             minimumSize: const Size.fromHeight(52),
             backgroundColor: Colors.green.shade800,
           ),
-          onPressed: () => _placeOrder(context, ref),
+          onPressed: placing || !storeOpen ? null : () => _placeOrder(context, ref),
           child: Row(
             children: [
               Text(formatMoney(totalPaise),

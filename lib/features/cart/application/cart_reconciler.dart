@@ -1,7 +1,9 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/network/api_exceptions.dart';
 import '../../catalog/data/catalog_api.dart';
 import '../../catalog/data/catalog_repository.dart';
+import '../../catalog/domain/product.dart';
 import '../data/coupon_api.dart';
 import '../domain/cart.dart';
 import '../domain/coupon.dart';
@@ -14,7 +16,7 @@ final cartReconcilerProvider = Provider<CartReconciler>(
   ),
 );
 
-/// Compares a local cart with the server's current state.
+/// Compares a local cart with the server's current products and coupon rules.
 class CartReconciler {
   CartReconciler({required this.catalogApi, required this.couponApi});
 
@@ -26,93 +28,99 @@ class CartReconciler {
       return ReconciliationResult(cart: cart, changes: const []);
     }
 
-    // 1. Fetch current products for items in the cart
-    final productIds = cart.lines.map((l) => l.productId).toList();
-    final serverProducts = await catalogApi.getProductsByIds(productIds);
-    final productMap = {for (var p in serverProducts) p.id: p};
+    // The batch endpoint accepts at most 50 IDs. Chunking also makes this
+    // safe if a cart grows beyond the normal UI limit.
+    final products = <String, Product>{};
+    final missingIds = <String>{};
+    for (var start = 0; start < cart.lines.length; start += 50) {
+      final end = start + 50 < cart.lines.length
+          ? start + 50
+          : cart.lines.length;
+      final batch = await catalogApi.getProductsByIds(
+        cart.lines.sublist(start, end).map((line) => line.productId).toList(),
+      );
+      for (final product in batch.products) {
+        products[product.id] = product;
+      }
+      missingIds.addAll(batch.missingIds);
+    }
 
-    final List<CartLine> reconciledLines = [];
-    final List<CartChange> changes = [];
-
-    // 2. Process each cart line
+    final lines = <CartLine>[];
+    final changes = <CartChange>[];
     for (final line in cart.lines) {
-      final serverProduct = productMap[line.productId];
-
-      // If product no longer exists or is out of stock (stock == 0)
-      if (serverProduct == null || serverProduct.stock <= 0) {
-        changes.add(CartChange.removed(
+      final product = products[line.productId];
+      if (product == null || missingIds.contains(line.productId)) {
+        changes.add(ProductUnavailable(
           productId: line.productId,
           productName: line.name,
-          reason: 'Product is no longer available or out of stock',
+        ));
+        continue;
+      }
+      if (product.stock <= 0) {
+        changes.add(OutOfStock(
+          productId: line.productId,
+          productName: product.name,
         ));
         continue;
       }
 
-      int newQuantity = line.quantity;
-      final maxAllowed = serverProduct.stock < serverProduct.maxPerOrder
-          ? serverProduct.stock
-          : serverProduct.maxPerOrder;
-
-      if (newQuantity > maxAllowed) {
-        newQuantity = maxAllowed;
-        changes.add(CartChange.quantityAdjusted(
+      final available = product.stock < product.maxPerOrder
+          ? product.stock
+          : product.maxPerOrder;
+      if (available <= 0) {
+        changes.add(OutOfStock(
           productId: line.productId,
-          productName: serverProduct.name,
-          oldQuantity: line.quantity,
-          newQuantity: newQuantity,
+          productName: product.name,
+        ));
+        continue;
+      }
+      final quantity = line.quantity > available ? available : line.quantity;
+      if (quantity < line.quantity) {
+        changes.add(QuantityReduced(
+          productId: line.productId,
+          requestedQuantity: line.quantity,
+          availableQuantity: quantity,
+          productName: product.name,
         ));
       }
-
-      if (serverProduct.pricePaise != line.unitPricePaise) {
-        changes.add(CartChange.priceChanged(
+      if (line.unitPricePaise != product.pricePaise) {
+        changes.add(PriceChanged(
           productId: line.productId,
-          productName: serverProduct.name,
           oldPricePaise: line.unitPricePaise,
-          newPricePaise: serverProduct.pricePaise,
+          newPricePaise: product.pricePaise,
+          productName: product.name,
         ));
       }
-
-      reconciledLines.add(CartLine(
-        productId: serverProduct.id,
-        name: serverProduct.name,
-        emoji: serverProduct.emoji,
-        unit: serverProduct.unit,
-        unitPricePaise: serverProduct.pricePaise,
-        mrpPaise: serverProduct.mrpPaise,
-        quantity: newQuantity,
-        maxPerOrder: serverProduct.maxPerOrder,
+      lines.add(CartLine(
+        productId: product.id,
+        name: product.name,
+        emoji: product.emoji,
+        unit: product.unit,
+        unitPricePaise: product.pricePaise,
+        quantity: quantity,
+        maxPerOrder: available,
       ));
     }
 
-    // 3. Reconcile coupon if present
-    Coupon? reconciledCoupon = cart.coupon;
-    if (cart.coupon != null) {
+    Coupon? coupon = cart.coupon;
+    if (coupon != null) {
       try {
-        final serverCoupons = await couponApi.getAvailableCoupons();
-        final matchedCoupon = serverCoupons.where((c) => c.code == cart.coupon!.code).firstOrNull;
-
-        if (matchedCoupon == null) {
-          reconciledCoupon = null;
-          changes.add(CartChange.couponRemoved(
-            code: cart.coupon!.code,
-            reason: 'Coupon is expired or no longer valid',
-          ));
-        } else {
-          reconciledCoupon = matchedCoupon;
+        coupon = await couponApi.validate(coupon.code);
+      } on ClientException catch (error) {
+        if (error.code != 'COUPON_NOT_FOUND' && error.code != 'COUPON_EXPIRED') {
+          rethrow;
         }
-      } catch (_) {
-        // If coupon validation fails due to network/transient issues during reconciliation, keep existing coupon or handle safely
+        changes.add(CouponRemoved(
+          code: coupon.code,
+          reason: error.code == 'COUPON_EXPIRED' ? 'EXPIRED' : 'NOT_FOUND',
+        ));
+        coupon = null;
       }
     }
 
-    final reconciledCart = Cart(
-      lines: reconciledLines,
-      coupon: reconciledCoupon,
-    );
-
     return ReconciliationResult(
-      cart: reconciledCart,
-      changes: changes,
+      cart: Cart(lines: lines, coupon: coupon),
+      changes: List.unmodifiable(changes),
     );
   }
 }

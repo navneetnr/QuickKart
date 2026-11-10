@@ -15,9 +15,11 @@ class PriceChanged extends CartChange {
     required this.productId,
     required this.oldPricePaise,
     required this.newPricePaise,
+    this.productName,
   });
 
   final String productId;
+  final String? productName;
   final int oldPricePaise;
   final int newPricePaise;
 
@@ -34,9 +36,10 @@ class PriceChanged extends CartChange {
 
 /// The product exists but has zero stock right now.
 class OutOfStock extends CartChange {
-  const OutOfStock({required this.productId});
+  const OutOfStock({required this.productId, this.productName});
 
   final String productId;
+  final String? productName;
 
   @override
   bool get requiresUserReview => true;
@@ -51,9 +54,11 @@ class QuantityReduced extends CartChange {
     required this.productId,
     required this.requestedQuantity,
     required this.availableQuantity,
+    this.productName,
   });
 
   final String productId;
+  final String? productName;
   final int requestedQuantity;
   final int availableQuantity;
 
@@ -67,9 +72,10 @@ class QuantityReduced extends CartChange {
 
 /// The product is no longer sold (reported as `missing` by the API).
 class ProductUnavailable extends CartChange {
-  const ProductUnavailable({required this.productId});
+  const ProductUnavailable({required this.productId, this.productName});
 
   final String productId;
+  final String? productName;
 
   @override
   bool get requiresUserReview => true;

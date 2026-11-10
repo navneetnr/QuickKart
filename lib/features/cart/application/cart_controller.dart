@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../catalog/domain/product.dart';
@@ -10,7 +12,23 @@ final cartControllerProvider =
     NotifierProvider<CartController, Cart>(CartController.new);
 
 class CartController extends Notifier<Cart> {
+  Future<void> _writeQueue = Future<void>.value();
+
   CartStorage get _storage => ref.read(cartStorageProvider);
+
+  Future<void> _serialize(Future<void> Function() operation) {
+    final previous = _writeQueue;
+    final finished = Completer<void>();
+    _writeQueue = finished.future;
+    return () async {
+      await previous;
+      try {
+        await operation();
+      } finally {
+        finished.complete();
+      }
+    }();
+  }
 
   @override
   Cart build() => const Cart.empty();
@@ -20,65 +38,81 @@ class CartController extends Notifier<Cart> {
 
   /// Adds one unit of [product].
   Future<void> add(Product product) async {
-    final current = state;
-    final existing = current.lineFor(product.id);
-    final Cart updated;
-    if (existing == null) {
-      if (!product.inStock) return;
-      updated = current.upsertLine(CartLine.fromProduct(product));
-    } else {
-      if (existing.quantity >= existing.maxPerOrder) return;
-      updated = current.updateQuantity(product.id, existing.quantity + 1);
-    }
-    await _storage.save(updated);
-    state = updated;
+    return _serialize(() async {
+      final current = state;
+      final existing = current.lineFor(product.id);
+      final Cart updated;
+      if (existing == null) {
+        if (!product.inStock) return;
+        updated = current.upsertLine(CartLine.fromProduct(product));
+      } else {
+        if (existing.quantity >= existing.maxPerOrder) return;
+        updated = current.updateQuantity(product.id, existing.quantity + 1);
+      }
+      await _storage.save(updated);
+      state = updated;
+    });
   }
 
   /// Adds one more unit of a product that is already in the cart.
   Future<void> increment(String productId) async {
-    final current = state;
-    final line = current.lineFor(productId);
-    if (line == null || line.quantity >= line.maxPerOrder) return;
-    final updated = current.updateQuantity(productId, line.quantity + 1);
-    await _storage.save(updated);
-    state = updated;
+    return _serialize(() async {
+      final current = state;
+      final line = current.lineFor(productId);
+      if (line == null || line.quantity >= line.maxPerOrder) return;
+      final updated = current.updateQuantity(productId, line.quantity + 1);
+      await _storage.save(updated);
+      state = updated;
+    });
   }
 
   /// Removes one unit (and the line when it reaches zero).
   Future<void> decrement(String productId) async {
-    final line = state.lineFor(productId);
-    if (line == null) return;
-    final updated = state.updateQuantity(productId, line.quantity - 1);
-    await _storage.save(updated);
-    state = updated;
+    return _serialize(() async {
+      final line = state.lineFor(productId);
+      if (line == null) return;
+      final updated = state.updateQuantity(productId, line.quantity - 1);
+      await _storage.save(updated);
+      state = updated;
+    });
   }
 
   Future<void> remove(String productId) async {
-    final updated = state.removeLine(productId);
-    await _storage.save(updated);
-    state = updated;
+    return _serialize(() async {
+      final updated = state.removeLine(productId);
+      await _storage.save(updated);
+      state = updated;
+    });
   }
 
   Future<void> applyCoupon(Coupon coupon) async {
-    final updated = state.withCoupon(coupon);
-    await _storage.save(updated);
-    state = updated;
+    return _serialize(() async {
+      final updated = state.withCoupon(coupon);
+      await _storage.save(updated);
+      state = updated;
+    });
   }
 
   Future<void> removeCoupon() async {
-    final updated = state.withoutCoupon();
-    await _storage.save(updated);
-    state = updated;
+    return _serialize(() async {
+      final updated = state.withoutCoupon();
+      await _storage.save(updated);
+      state = updated;
+    });
   }
 
   /// Replaces the whole cart (e.g. after reconciliation).
   Future<void> replace(Cart cart) async {
-    state = cart;
-    await _storage.save(cart);
+    return _serialize(() async {
+      await _storage.save(cart);
+      state = cart;
+    });
   }
 
   Future<void> clear() async {
-    state = const Cart.empty();
-    await _storage.clear();
+    return _serialize(() async {
+      await _storage.clear();
+      state = const Cart.empty();
+    });
   }
 }

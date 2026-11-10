@@ -42,13 +42,15 @@ class CatalogRepository {
     required String categoryId,
     String? cursor,
     int limit = 10,
+    bool forceRefresh = false,
   }) async {
-    final cacheKey = 'page.${cursor ?? 'first'}';
+    final cacheKey = 'page.$categoryId.limit$limit.${cursor ?? 'first'}';
     try {
       final page = await _api.getProducts(
         categoryId: categoryId == kAllProductsCategory ? null : categoryId,
         cursor: cursor,
         limit: limit,
+        forceRefresh: forceRefresh,
       );
       await _cache.write(cacheKey, page);
       return page;
@@ -62,6 +64,6 @@ class CatalogRepository {
 
   Future<List<Product>> search(String query) => _api.search(query);
 
-  Future<CatalogPage> getDeals({int limit = 10}) =>
-      _api.getProducts(dealsOnly: true, limit: limit);
+  Future<CatalogPage> getDeals({int limit = 10, bool forceRefresh = false}) =>
+      _api.getProducts(dealsOnly: true, limit: limit, forceRefresh: forceRefresh);
 }

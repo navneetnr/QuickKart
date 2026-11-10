@@ -72,7 +72,11 @@ class CatalogController extends FamilyNotifier<CatalogState, String> {
 
   Future<void> _loadFirstPage() async {
     try {
-      final page = await _repo.getPage(categoryId: arg, limit: pageSize);
+      final page = await _repo.getPage(
+        categoryId: arg,
+        limit: pageSize,
+        forceRefresh: true,
+      );
       state = CatalogState(
         items: page.items,
         nextCursor: page.nextCursor,
@@ -121,7 +125,11 @@ class CatalogController extends FamilyNotifier<CatalogState, String> {
   Future<void> refresh() async {
     state = state.copyWith(isRefreshing: true, clearError: true);
     try {
-      final page = await _repo.getPage(categoryId: arg, limit: pageSize);
+      final page = await _repo.getPage(
+        categoryId: arg,
+        limit: pageSize,
+        forceRefresh: true,
+      );
       state = CatalogState(
         items: page.items,
         nextCursor: page.nextCursor,
